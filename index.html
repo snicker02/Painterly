@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Painterly Studio</title>
+
+<!-- ============================ SHADERS ============================ -->
+<script type="x-shader/x-vertex" id="vs_quad">
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script type="x-shader/x-fragment" id="fs_tex">
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform float uMul;
+void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb * uMul, 1.0); }
+</script>
+
+<script type="x-shader/x-vertex" id="vs_stroke">
+attribute vec2  aPos;
+attribute vec2  aUV;
+attribute vec3  aColor;
+attribute float aSeed;
+varying vec2  vUV;
+varying vec3  vColor;
+varying float vSeed;
+void main(){ vUV = aUV; vColor = aColor; vSeed = aSeed; gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<!-- Parametric brush: one profile driven by 14 params. Built-in shapes and custom
+     brushes are just parameter sets. Per-stroke variation from the vertex seed. -->
+<script type="x-shader/x-fragment" id="fs_stroke">
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2  vUV;
+varying vec3  vColor;
+varying float vSeed;
+uniform float uImpasto;
+uniform float uBodyW, uEdgeHard, uFlat, uTipFront, uTipBack, uBelly, uPressure;
+uniform float uBristleN, uBristleD, uGrain, uGrainScale, uEdgeNoise, uRelief, uVary;
+const float TAU = 6.28318530718;
+const float PI  = 3.14159265;
+float h11(float x){ return fract(sin(x * 127.1) * 43758.5453); }
+float vnoise2(vec2 p){
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  float a = fract(sin(dot(i, vec2(127.1,311.7))) * 43758.5453);
+  float b = fract(sin(dot(i + vec2(1.0,0.0), vec2(127.1,311.7))) * 43758.5453);
+  float c = fract(sin(dot(i + vec2(0.0,1.0), vec2(127.1,311.7))) * 43758.5453);
+  float d = fract(sin(dot(i + vec2(1.0,1.0), vec2(127.1,311.7))) * 43758.5453);
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+void main(){
+  float along = vUV.x, across = vUV.y, ax = abs(across), a01 = across * 0.5 + 0.5;
+  float s = vSeed;
+
+  // per-stroke variation
+  float vy    = uVary;
+  float vBody = uBodyW    * (1.0 + (h11(s + 1.3) - 0.5) * 0.7 * vy);
+  float vTF   = uTipFront * (1.0 + (h11(s + 2.1) - 0.5) * 0.9 * vy);
+  float vTB   = uTipBack  * (1.0 + (h11(s + 3.7) - 0.5) * 0.9 * vy);
+  float vPr   = uPressure + (h11(s + 4.3) - 0.5) * 0.6 * vy;
+  float vGr   = uGrain    * (1.0 + (h11(s + 5.9) - 0.5) * 0.8 * vy);
+
+  // length envelope (tapered ends, optional pointed belly, pressure skew)
+  float envF = smoothstep(0.0, max(0.01, vTF), along);
+  float envB = smoothstep(0.0, max(0.01, vTB), 1.0 - along);
+  float env  = envF * envB;
+  env = mix(env, env * sin(PI * along), uBelly);
+  float press = 1.0 + vPr * (along - 0.5) * 2.0;
+  float halfW = clamp(vBody * env * press, 0.0, 1.3);
+
+  // ragged edge
+  halfW += (vnoise2(vec2(along * 20.0, s * 17.0)) - 0.5) * uEdgeNoise * 0.45;
+  halfW = max(halfW, 0.0);
+
+  // silhouette with soft/crisp edge
+  float soft = 1.0 - uEdgeHard;
+  float alpha = 1.0 - smoothstep(halfW * (1.0 - soft), halfW + 0.004, ax);
+  alpha *= smoothstep(0.0, 0.02, halfW);   // clean vanishing at tips
+
+  // bristles
+  if(uBristleN > 0.5){
+    float ridge = 0.5 + 0.5 * sin(a01 * uBristleN * TAU + s * 20.0);
+    alpha *= mix(1.0, ridge, uBristleD);
+  }
+  // dry-brush grain
+  float n = 0.0;
+  if(vGr > 0.001){
+    n = vnoise2(vec2(along * uGrainScale, a01 * uGrainScale * 0.55) + s * 10.0);
+    float holes = smoothstep(0.30, 0.62, n + (0.5 - vGr) * 0.4);
+    alpha *= mix(1.0, holes, vGr);
+  }
+
+  if(alpha < 0.012) discard;
+
+  // relief -> impasto lighting (upper-left)
+  float relief = -across * (1.0 - uFlat);
+  if(uBristleN > 0.5) relief += cos(a01 * uBristleN * TAU + s * 20.0) * uBristleD * 0.5;
+  if(vGr > 0.001)     relief += (n - 0.5) * vGr;
+  float shade = 1.0 + uImpasto * uRelief * relief * 0.6;
+  gl_FragColor = vec4(clamp(vColor * shade, 0.0, 1.0), alpha);
+}
+</script>
+
+<script type="x-shader/x-fragment" id="fs_edge">
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 vUv;
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+uniform float uSigma;
+const int R = 7;
+const vec3 LUM = vec3(0.299, 0.587, 0.114);
+float tanhf(float x){ x = clamp(x, -15.0, 15.0); return 1.0 - 2.0 / (exp(2.0 * x) + 1.0); }
+float lum(vec2 uv){ return dot(texture2D(uSrc, uv).rgb, LUM); }
+void main(){
+  float s1 = max(0.3, uSigma), s2 = s1 * 1.6;
+  float i1 = -1.0 / (2.0 * s1 * s1), i2 = -1.0 / (2.0 * s2 * s2);
+  float sum1 = 0.0, sum2 = 0.0, wa = 0.0, wb = 0.0;
+  for(int y = -R; y <= R; y++){
+    for(int x = -R; x <= R; x++){
+      vec2 o = vec2(float(x), float(y));
+      float d2 = dot(o, o);
+      float g1 = exp(d2 * i1), g2 = exp(d2 * i2);
+      float L = lum(vUv + o * uTexel);
+      sum1 += L * g1; wa += g1; sum2 += L * g2; wb += g2;
+    }
+  }
+  float D = (sum1 / wa) - 0.988 * (sum2 / wb);
+  float e = D >= 0.0 ? 1.0 : 1.0 + tanhf(22.0 * D);
+  gl_FragColor = vec4(vec3(clamp(e, 0.0, 1.0)), 1.0);
+}
+</script>
+
+<script type="x-shader/x-fragment" id="fs_comp">
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 vUv;
+uniform sampler2D uPaint;
+uniform sampler2D uEdge;
+uniform vec2  uRes;
+uniform float uPosterize, uSat, uContrast, uBright, uWarmth;
+uniform float uPaper, uPaperMode, uEdgeOn, uEdgeStrength, uVignette;
+uniform vec3  uEdgeColor;
+const vec3 LUM = vec3(0.299, 0.587, 0.114);
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  float a = hash(i), b = hash(i + vec2(1.0,0.0)), c = hash(i + vec2(0.0,1.0)), d = hash(i + vec2(1.0,1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm(vec2 p){ float s = 0.0, amp = 0.5; for(int i = 0; i < 5; i++){ s += amp * vnoise(p); p *= 2.0; amp *= 0.5; } return s; }
+void main(){
+  vec3 col = texture2D(uPaint, vUv).rgb;
+  if(uPosterize > 1.5){ col = floor(col * uPosterize + 0.5) / uPosterize; }
+  col = (col - 0.5) * uContrast + 0.5 + uBright;
+  float l = dot(col, LUM);
+  col = mix(vec3(l), col, uSat);
+  col += vec3(uWarmth, uWarmth * 0.15, -uWarmth) * 0.6;
+  col = clamp(col, 0.0, 1.0);
+
+  vec2 pc = vUv * uRes;
+  float fine = vnoise(pc * 0.5);
+  float paper;
+  if(uPaperMode < 0.5){
+    float weave = 0.5 + 0.5 * sin(pc.x * 2.2) * sin(pc.y * 2.2);
+    paper = mix(0.90, 1.0, weave) * mix(0.92, 1.0, fine);
+  } else if(uPaperMode < 1.5){
+    paper = (0.82 + 0.18 * fbm(pc * 0.06)) * mix(0.94, 1.0, fine);
+  } else {
+    paper = 0.80 + 0.20 * (vnoise(pc * 0.9) * 0.6 + vnoise(pc * 2.1) * 0.4);
+  }
+  col *= mix(1.0, paper, uPaper);
+
+  float e = texture2D(uEdge, vUv).r;
+  if(uEdgeOn > 0.5){ col = mix(col, uEdgeColor, clamp((1.0 - e) * uEdgeStrength, 0.0, 1.0)); }
+
+  vec2 q = vUv - 0.5;
+  col *= 1.0 - uVignette * dot(q, q) * 2.0;
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}
+</script>
+
+<style>
+  :root{ --bg:#0e0f13; --panel:#171922; --panel2:#1e2130; --line:#2a2e3f; --text:#e7e9f0; --dim:#9aa0b4; --accent:#c9a24b; --accent2:#6e8cff; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; }
+  body{ background:var(--bg); color:var(--text); font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  header{ display:flex; align-items:center; gap:14px; padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1{ font-size:15px; font-weight:600; margin:0; letter-spacing:.3px; }
+  header h1 span{ color:var(--accent); }
+  header .sub{ color:var(--dim); font-size:12px; }
+  header .spacer{ flex:1; }
+  button, select, label.file{ background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 12px; font:inherit; cursor:pointer; transition:.12s; }
+  button:hover, label.file:hover, select:hover{ border-color:#414761; background:#242838; }
+  button.primary{ background:var(--accent); color:#1a1400; border-color:var(--accent); font-weight:600; }
+  button.primary:hover{ filter:brightness(1.08); }
+  button:disabled{ opacity:.4; cursor:default; }
+  input[type=file]{ display:none; }
+  .hidden{ display:none; }
+  main{ flex:1; display:flex; min-height:0; }
+  .stage{ flex:1; position:relative; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(45deg,#151720 25%,transparent 25%,transparent 75%,#151720 75%),linear-gradient(45deg,#151720 25%,#101219 25%,#101219 75%,#151720 75%);
+    background-size:26px 26px; background-position:0 0,13px 13px; overflow:hidden; min-width:0; }
+  .stage.drag::after{ content:"Drop image"; position:absolute; inset:14px; border:2px dashed var(--accent2); border-radius:14px; display:flex; align-items:center; justify-content:center; color:var(--accent2); font-size:18px; background:rgba(110,140,255,.06); }
+  #glcanvas{ max-width:100%; max-height:100%; box-shadow:0 8px 40px rgba(0,0,0,.5); border-radius:4px; display:none; }
+  .empty{ text-align:center; color:var(--dim); max-width:360px; padding:24px; }
+  .empty h2{ color:var(--text); font-weight:600; margin:0 0 8px; }
+  .empty .drop{ margin-top:18px; border:1.5px dashed var(--line); border-radius:12px; padding:22px; cursor:pointer; transition:.15s; }
+  .empty .drop:hover{ border-color:var(--accent2); color:var(--text); }
+  .badge{ position:absolute; left:14px; top:12px; font-size:11px; color:var(--dim); background:rgba(0,0,0,.45); padding:4px 9px; border-radius:20px; pointer-events:none; }
+  aside{ width:318px; flex:none; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:0 0 40px; }
+  aside::-webkit-scrollbar{ width:10px; }
+  aside::-webkit-scrollbar-thumb{ background:#262a3a; border-radius:6px; border:2px solid var(--panel); }
+  .presets{ display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:16px; border-bottom:1px solid var(--line); }
+  .presets button{ padding:9px 6px; font-size:12.5px; }
+  .presets button.active{ border-color:var(--accent); color:var(--accent); background:#221d10; }
+  .group{ border-bottom:1px solid var(--line); }
+  .group > h3{ margin:0; padding:13px 16px 6px; font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:600; }
+  .group .body{ padding:2px 16px 14px; }
+  .row{ margin:11px 0; }
+  .row .lbl{ display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:5px; }
+  .row .lbl .val{ color:var(--accent); font-variant-numeric:tabular-nums; }
+  input[type=range]{ -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:3px; background:var(--line); outline:none; }
+  input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:15px; height:15px; border-radius:50%; background:var(--text); cursor:pointer; border:2px solid var(--panel); }
+  input[type=range]::-moz-range-thumb{ width:15px; height:15px; border-radius:50%; background:var(--text); cursor:pointer; border:2px solid var(--panel); }
+  .seg{ display:flex; gap:6px; }
+  .seg button{ flex:1; padding:6px 4px; font-size:12px; }
+  .seg button.on{ border-color:var(--accent2); color:var(--accent2); background:#151a2e; }
+  .toggle{ display:flex; align-items:center; justify-content:space-between; margin:11px 0; font-size:12.5px; }
+  .switch{ width:38px; height:21px; border-radius:20px; background:var(--line); position:relative; cursor:pointer; transition:.15s; flex:none; }
+  .switch.on{ background:var(--accent2); }
+  .switch i{ position:absolute; top:2px; left:2px; width:17px; height:17px; border-radius:50%; background:#fff; transition:.15s; }
+  .switch.on i{ left:19px; }
+  select{ width:100%; }
+  .btnrow{ display:flex; gap:8px; }
+  .btnrow button{ flex:1; }
+  .actions{ display:flex; gap:8px; padding:14px 16px 4px; }
+  .actions button{ flex:1; }
+  .hint{ padding:6px 16px 0; color:var(--dim); font-size:11px; }
+  #brushPreview{ width:100%; height:auto; border:1px solid var(--line); border-radius:8px; background:#ece9e2; display:block; margin:2px 0 8px; }
+  #brushIO{ width:100%; font:11px monospace; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px; resize:vertical; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Painterly&nbsp;<span>Studio</span></h1>
+  <span class="sub">custom brushes &bull; stroke-based rendering</span>
+  <span class="spacer"></span>
+  <label class="file" for="fileIn">Open image</label>
+  <input type="file" id="fileIn" accept="image/*">
+  <button id="dlBtn" disabled>Download</button>
+</header>
+
+<main>
+  <div class="stage" id="stage">
+    <span class="badge" id="badge" style="display:none"></span>
+    <canvas id="glcanvas"></canvas>
+    <div class="empty" id="empty">
+      <h2>Paint a photo with real strokes</h2>
+      <div>Oriented brush strokes follow the image's edge flow. Design your own brush in the panel &rarr; and randomize it. No image needed to build brushes.</div>
+      <div class="drop" id="dropZone">Click to open an image<br><small style="color:#6b7089">or drop / paste one anywhere</small></div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="presets" id="presets"></div>
+
+    <div class="group">
+      <h3>Brush</h3>
+      <div class="body">
+        <div class="row"><div class="lbl"><span>Active brush</span></div><select id="brushSel"></select></div>
+        <canvas id="brushPreview" width="264" height="104"></canvas>
+        <div class="btnrow" style="margin-bottom:6px">
+          <button id="btnRandom">Randomize</button>
+          <button id="btnSaveBrush">Save as&hellip;</button>
+          <button id="btnEditBrush">Edit</button>
+        </div>
+        <div id="designer" class="hidden">
+          <div id="brushSliders"></div>
+          <div class="row"><div class="lbl"><span>Export / import brushes</span></div>
+            <textarea id="brushIO" rows="3" placeholder="Custom brushes JSON appears here on Export; paste JSON and press Import"></textarea>
+          </div>
+          <div class="btnrow">
+            <button id="btnExport">Export</button>
+            <button id="btnImport">Import</button>
+            <button id="btnDelBrush">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Stroke layout</h3>
+      <div class="body">
+        <div class="row" data-r="brushSize"><div class="lbl"><span>Stroke size</span><span class="val"></span></div><input type="range" min="3" max="34" step="1"></div>
+        <div class="row" data-r="strokeLength"><div class="lbl"><span>Stroke length</span><span class="val"></span></div><input type="range" min="1" max="6" step="0.25"></div>
+        <div class="row" data-r="density"><div class="lbl"><span>Coverage</span><span class="val"></span></div><input type="range" min="0.5" max="1.7" step="0.05"></div>
+        <div class="row" data-r="detail"><div class="lbl"><span>Detail (fine layers)</span><span class="val"></span></div><input type="range" min="0" max="1" step="0.05"></div>
+        <div class="row" data-r="wobble"><div class="lbl"><span>Angle variation</span><span class="val"></span></div><input type="range" min="0" max="1" step="0.05"></div>
+        <div class="row" data-r="colorJitter"><div class="lbl"><span>Color variation</span><span class="val"></span></div><input type="range" min="0" max="0.3" step="0.01"></div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Paint body</h3>
+      <div class="body">
+        <div class="row" data-r="impasto"><div class="lbl"><span>Impasto (relief)</span><span class="val"></span></div><input type="range" min="0" max="1.5" step="0.05"></div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Line work</h3>
+      <div class="body">
+        <div class="toggle"><span>Ink outlines</span><div class="switch" id="edgeSwitch"><i></i></div></div>
+        <div class="row" data-r="edgeStrength"><div class="lbl"><span>Line strength</span><span class="val"></span></div><input type="range" min="0" max="2" step="0.05"></div>
+        <div class="row" data-r="edgeSigma"><div class="lbl"><span>Line width</span><span class="val"></span></div><input type="range" min="0.6" max="2.6" step="0.05"></div>
+        <div class="toggle"><span>Ink color</span><input type="color" id="edgeColor" value="#191410" style="width:40px;height:26px;padding:2px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;cursor:pointer"></div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Surface</h3>
+      <div class="body">
+        <div class="row"><div class="lbl"><span>Texture</span></div>
+          <div class="seg" id="paperMode"><button data-v="0">Canvas</button><button data-v="1">Watercolor</button><button data-v="2">Rough</button></div>
+        </div>
+        <div class="row" data-r="paper"><div class="lbl"><span>Texture amount</span><span class="val"></span></div><input type="range" min="0" max="1" step="0.02"></div>
+        <div class="row" data-r="vignette"><div class="lbl"><span>Vignette</span><span class="val"></span></div><input type="range" min="0" max="1" step="0.02"></div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Color</h3>
+      <div class="body">
+        <div class="row" data-r="sat"><div class="lbl"><span>Saturation</span><span class="val"></span></div><input type="range" min="0" max="2" step="0.02"></div>
+        <div class="row" data-r="contrast"><div class="lbl"><span>Contrast</span><span class="val"></span></div><input type="range" min="0.5" max="1.8" step="0.02"></div>
+        <div class="row" data-r="bright"><div class="lbl"><span>Brightness</span><span class="val"></span></div><input type="range" min="-0.3" max="0.3" step="0.01"></div>
+        <div class="row" data-r="warmth"><div class="lbl"><span>Warmth</span><span class="val"></span></div><input type="range" min="-0.3" max="0.3" step="0.01"></div>
+        <div class="row" data-r="posterize"><div class="lbl"><span>Posterize</span><span class="val"></span></div><input type="range" min="0" max="12" step="1"></div>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Output</h3>
+      <div class="body">
+        <div class="row"><div class="lbl"><span>Process resolution</span></div>
+          <select id="procSize">
+            <option value="1024">1024 px (fast)</option>
+            <option value="1400" selected>1400 px</option>
+            <option value="1800">1800 px</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button id="reshuffle">Reshuffle strokes</button>
+          <button class="primary" id="dlBtn2" disabled>Download PNG</button>
+        </div>
+        <div class="hint" id="hint">Load an image to begin.</div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>
+"use strict";
+(function(){
+
+// ---------------------------------------------------------------- brush model
+// A brush = 14 numeric params. Built-in shapes and custom brushes share this model.
+const BRUSH_FIELDS = ["bodyW","edgeHard","flat","tipFront","tipBack","belly","pressure","bristleN","bristleD","grain","grainScale","edgeNoise","relief","vary"];
+const BRUSH_SLIDERS = [
+  ["bodyW","Width",0.2,1,0.02],
+  ["edgeHard","Edge hardness",0,1,0.02],
+  ["flat","Flatness",0,1,0.02],
+  ["tipFront","Front taper",0.02,0.6,0.01],
+  ["tipBack","Back taper",0.02,0.6,0.01],
+  ["belly","Belly (pointed)",0,1,0.02],
+  ["pressure","Pressure skew",-0.6,0.6,0.02],
+  ["bristleN","Bristle count",0,14,1],
+  ["bristleD","Bristle depth",0,1,0.02],
+  ["grain","Dry grain",0,1,0.02],
+  ["grainScale","Grain scale",6,40,1],
+  ["edgeNoise","Ragged edge",0,1,0.02],
+  ["relief","Impasto relief",0,1.5,0.02],
+  ["vary","Per-stroke variation",0,1,0.02]
+];
+const BRUSH_PRESETS = {
+  "Round":     { bodyW:0.85, edgeHard:0.15, flat:0.10, tipFront:0.50, tipBack:0.50, belly:0.20, pressure:0.0,  bristleN:0,  bristleD:0.0, grain:0.0, grainScale:18, edgeNoise:0.05, relief:0.7, vary:0.25 },
+  "Flat":      { bodyW:0.95, edgeHard:0.80, flat:0.80, tipFront:0.06, tipBack:0.06, belly:0.0,  pressure:0.0,  bristleN:0,  bristleD:0.0, grain:0.0, grainScale:18, edgeNoise:0.05, relief:0.5, vary:0.20 },
+  "Bristle":   { bodyW:0.90, edgeHard:0.40, flat:0.30, tipFront:0.18, tipBack:0.18, belly:0.10, pressure:0.0,  bristleN:9,  bristleD:0.55,grain:0.10,grainScale:20, edgeNoise:0.15, relief:1.0, vary:0.30 },
+  "Tapered":   { bodyW:0.80, edgeHard:0.50, flat:0.20, tipFront:0.50, tipBack:0.50, belly:1.0,  pressure:0.0,  bristleN:0,  bristleD:0.0, grain:0.0, grainScale:18, edgeNoise:0.05, relief:0.8, vary:0.25 },
+  "Dry brush": { bodyW:0.90, edgeHard:0.45, flat:0.35, tipFront:0.12, tipBack:0.12, belly:0.10, pressure:0.0,  bristleN:4,  bristleD:0.30,grain:0.80,grainScale:24, edgeNoise:0.40, relief:0.9, vary:0.35 },
+  "Chisel":    { bodyW:0.95, edgeHard:0.85, flat:0.60, tipFront:0.04, tipBack:0.10, belly:0.0,  pressure:0.5,  bristleN:0,  bristleD:0.0, grain:0.0, grainScale:18, edgeNoise:0.08, relief:0.8, vary:0.20 }
+};
+function cloneBrush(o){ const b={}; BRUSH_FIELDS.forEach(k=> b[k]=o[k]); return b; }
+
+let customBrushes = [];                                   // [{name, params}]
+let currentBrush = cloneBrush(BRUSH_PRESETS["Bristle"]);
+let currentBrushName = "Bristle";
+
+// ---------------------------------------------------------------- style presets
+const PRESETS = {
+  "Thick Oil":    { brush:"Flat",      brushSize:15, strokeLength:2.75, density:0.95, detail:0.5, wobble:0.25, colorJitter:0.08, impasto:0.75, edgeOn:0, edgeStrength:0.6, edgeSigma:1.2, paperMode:0, paper:0.30, sat:1.15, contrast:1.10, bright:0.0,  warmth:0.04, posterize:0, vignette:0.16, edgeColor:"#191410" },
+  "Van Gogh":     { brush:"Bristle",   brushSize:10, strokeLength:4.5,  density:1.15, detail:0.7, wobble:0.55, colorJitter:0.13, impasto:1.05, edgeOn:0, edgeStrength:0.6, edgeSigma:1.1, paperMode:0, paper:0.24, sat:1.32, contrast:1.15, bright:0.02, warmth:0.05, posterize:0, vignette:0.20, edgeColor:"#191410" },
+  "Impasto Knife":{ brush:"Chisel",    brushSize:22, strokeLength:2.0,  density:0.85, detail:0.3, wobble:0.30, colorJitter:0.06, impasto:1.4,  edgeOn:0, edgeStrength:0.5, edgeSigma:1.2, paperMode:2, paper:0.20, sat:1.20, contrast:1.16, bright:0.0,  warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#191410" },
+  "Watercolor":   { brush:"Tapered",   brushSize:13, strokeLength:3.5,  density:1.05, detail:0.5, wobble:0.35, colorJitter:0.05, impasto:0.15, edgeOn:1, edgeStrength:0.45,edgeSigma:1.0, paperMode:1, paper:0.60, sat:0.95, contrast:0.96, bright:0.04, warmth:0.0,  posterize:0, vignette:0.10, edgeColor:"#2a2620" },
+  "Gouache":      { brush:"Flat",      brushSize:10, strokeLength:2.5,  density:1.1,  detail:0.6, wobble:0.30, colorJitter:0.06, impasto:0.45, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:2, paper:0.40, sat:1.06, contrast:1.05, bright:0.02, warmth:0.02, posterize:0, vignette:0.10, edgeColor:"#191410" },
+  "Ink Brush":    { brush:"Tapered",   brushSize:9,  strokeLength:4.0,  density:1.05, detail:0.8, wobble:0.40, colorJitter:0.05, impasto:0.3,  edgeOn:1, edgeStrength:0.9, edgeSigma:0.95,paperMode:1, paper:0.30, sat:0.92, contrast:1.08, bright:0.0,  warmth:0.0,  posterize:0, vignette:0.10, edgeColor:"#0d0b09" },
+  "Pointillist":  { brush:"Round",     brushSize:8,  strokeLength:1.0,  density:1.35, detail:0.75,wobble:0.6,  colorJitter:0.16, impasto:0.55, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:0, paper:0.18, sat:1.35, contrast:1.16, bright:0.02, warmth:0.02, posterize:0, vignette:0.16, edgeColor:"#191410" },
+  "Dry Sketch":   { brush:"Dry brush", brushSize:11, strokeLength:3.2,  density:1.0,  detail:0.7, wobble:0.4,  colorJitter:0.07, impasto:0.6,  edgeOn:1, edgeStrength:0.5, edgeSigma:1.0, paperMode:2, paper:0.5,  sat:1.0,  contrast:1.08, bright:0.03, warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#20201c" }
+};
+const NUMERIC = ["brushSize","strokeLength","density","detail","wobble","colorJitter","impasto","edgeStrength","edgeSigma","paper","vignette","sat","contrast","bright","warmth","posterize"];
+const STROKE_KEYS = { brushSize:1, strokeLength:1, density:1, detail:1, wobble:1, colorJitter:1 };
+let params = {}, curPreset = "Van Gogh";
+Object.assign(params, PRESETS["Van Gogh"]);
+
+// ---------------------------------------------------------------- GL
+const canvas = document.getElementById("glcanvas");
+const gl = canvas.getContext("webgl", { preserveDrawingBuffer:true, antialias:true, premultipliedAlpha:false })
+        || canvas.getContext("experimental-webgl", { preserveDrawingBuffer:true, antialias:true });
+if(!gl){ alert("WebGL is not available in this browser."); return; }
+function src(id){ return document.getElementById(id).textContent; }
+function compile(type, s){ const sh = gl.createShader(type); gl.shaderSource(sh, s); gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh) + "\n\n" + s); return sh; }
+function program(vsId, fsId, attribs){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, src(vsId)));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, src(fsId)));
+  attribs.forEach((name, i)=> gl.bindAttribLocation(p, i, name));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for(let i=0;i<n;i++){ const info = gl.getActiveUniform(p,i); u[info.name] = gl.getUniformLocation(p, info.name); }
+  return { p, u };
+}
+let PROG;
+try{
+  PROG = {
+    tex:    program("vs_quad",   "fs_tex",    ["aPos"]),
+    stroke: program("vs_stroke", "fs_stroke", ["aPos","aUV","aColor","aSeed"]),
+    edge:   program("vs_quad",   "fs_edge",   ["aPos"]),
+    comp:   program("vs_quad",   "fs_comp",   ["aPos"])
+  };
+}catch(e){ alert("Shader error:\n"+e.message); console.error(e); return; }
+
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const strokeBuf = gl.createBuffer();
+const previewBuf = gl.createBuffer();
+
+function makeTarget(w,h){
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return { tex, fbo, w, h };
+}
+let srcTex = null, T = {}, procW = 0, procH = 0;
+function allocTargets(w,h){
+  Object.values(T).forEach(t=>{ if(t){ gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); } });
+  T = { paint:makeTarget(w,h), edge:makeTarget(w,h) };
+  procW = w; procH = h;
+}
+const PREV_W = 264, PREV_H = 104;
+const previewTarget = makeTarget(PREV_W, PREV_H);
+
+function setQuadAttribs(){
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.disableVertexAttribArray(1); gl.disableVertexAttribArray(2); gl.disableVertexAttribArray(3);
+}
+const STRIDE = 8 * 4;
+function setStrokeAttribs(buffer){
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, STRIDE, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, STRIDE, 8);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, STRIDE, 16);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, STRIDE, 28);
+}
+function bindTex(unit, tex){ gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D, tex); }
+function hexRGB(hex){ const n = parseInt(hex.slice(1),16); return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255]; }
+function setBrushUniforms(u){
+  gl.uniform1f(u.uBodyW, currentBrush.bodyW);
+  gl.uniform1f(u.uEdgeHard, currentBrush.edgeHard);
+  gl.uniform1f(u.uFlat, currentBrush.flat);
+  gl.uniform1f(u.uTipFront, currentBrush.tipFront);
+  gl.uniform1f(u.uTipBack, currentBrush.tipBack);
+  gl.uniform1f(u.uBelly, currentBrush.belly);
+  gl.uniform1f(u.uPressure, currentBrush.pressure);
+  gl.uniform1f(u.uBristleN, currentBrush.bristleN);
+  gl.uniform1f(u.uBristleD, currentBrush.bristleD);
+  gl.uniform1f(u.uGrain, currentBrush.grain);
+  gl.uniform1f(u.uGrainScale, currentBrush.grainScale);
+  gl.uniform1f(u.uEdgeNoise, currentBrush.edgeNoise);
+  gl.uniform1f(u.uRelief, currentBrush.relief);
+  gl.uniform1f(u.uVary, currentBrush.vary);
+}
+
+// ---------------------------------------------------------------- image + flow
+let originalBitmap = null, LUM = null, IMG = null, imgW = 0, imgH = 0;
+function loadImage(img){
+  originalBitmap = img; rebuildSource();
+  canvas.style.display = "block";
+  document.getElementById("empty").style.display = "none";
+  document.getElementById("dlBtn").disabled = false;
+  document.getElementById("dlBtn2").disabled = false;
+  strokesDirty = true; requestRender();
+}
+function rebuildSource(){
+  if(!originalBitmap) return;
+  const ow = originalBitmap.width, oh = originalBitmap.height;
+  const cap = parseInt(document.getElementById("procSize").value, 10);
+  const maxAllowed = Math.min(cap, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  let w = ow, h = oh, m = Math.max(w, h);
+  if(m > maxAllowed){ const s = maxAllowed / m; w = Math.round(w*s); h = Math.round(h*s); }
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const cx = c.getContext("2d", { willReadFrequently:true });
+  cx.drawImage(originalBitmap, 0, 0, w, h);
+  if(!srcTex) srcTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, srcTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const data = cx.getImageData(0,0,w,h).data;
+  imgW = w; imgH = h; IMG = new Float32Array(w*h*3); LUM = new Float32Array(w*h);
+  for(let i=0, j=0, k=0; i<data.length; i+=4, j+=3, k++){
+    const r=data[i]/255, g=data[i+1]/255, b=data[i+2]/255;
+    IMG[j]=r; IMG[j+1]=g; IMG[j+2]=b; LUM[k]=0.299*r+0.587*g+0.114*b;
+  }
+  canvas.width = w; canvas.height = h; allocTargets(w, h); strokesDirty = true;
+  const badge = document.getElementById("badge");
+  badge.style.display = "block"; badge.textContent = ow+"\u00d7"+oh + (w!==ow ? "  \u2192  "+w+"\u00d7"+h : "");
+}
+function clampi(v,hi){ return v<0?0:(v>hi?hi:v); }
+function lumAt(x,y){ return LUM[clampi(y,imgH-1)*imgW + clampi(x,imgW-1)]; }
+function rgbAt(x,y,out){ const p=(clampi(y,imgH-1)*imgW + clampi(x,imgW-1))*3; out[0]=IMG[p]; out[1]=IMG[p+1]; out[2]=IMG[p+2]; }
+function gradAt(x,y,out){ out[0]=lumAt(x+1,y)-lumAt(x-1,y); out[1]=lumAt(x,y+1)-lumAt(x,y-1); }
+
+// ---------------------------------------------------------------- stroke generation
+function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+let strokeVertCount = 0, strokesDirty = true, seedSalt = 1;
+const CAP_STROKES = 130000, FLOATS_PER_STROKE = 12 * 8;
+let strokeScratch = null;
+function toClip(x,y){ return [ (x/imgW)*2 - 1, 1 - (y/imgH)*2 ]; }
+function rebuildStrokes(){
+  if(!IMG) return;
+  const rng = mulberry32(0x9E3779B9 ^ (seedSalt*2654435761));
+  if(!strokeScratch) strokeScratch = new Float32Array(CAP_STROKES * FLOATS_PER_STROKE);
+  const buf = strokeScratch; let off = 0, count = 0;
+  const B = params.brushSize, lenMul = params.strokeLength, dens = params.density, wob = params.wobble, cj = params.colorJitter, detail = params.detail;
+  const layers = [ [1.7, 1.45, 0.0], [1.05, 0.95, 0.03 * (1.0 - detail)] ];
+  if(detail > 0.15) layers.push([0.62, 0.55, 0.10 - detail*0.075]);
+  const col = [0,0,0], g = [0,0], HALF_PI_JIT = 1.15;
+  outer:
+  for(let li=0; li<layers.length; li++){
+    const spacing = Math.max(2.0, B * layers[li][0] / dens);
+    const width   = Math.max(1.2, B * layers[li][1]);
+    const thr     = layers[li][2];
+    const halfLen = Math.max(width*0.6, width * lenMul * 0.5);
+    const layerAngle = rng() * Math.PI;
+    for(let cy = spacing*0.5; cy < imgH; cy += spacing){
+      for(let cx = spacing*0.5; cx < imgW; cx += spacing){
+        if(count >= CAP_STROKES) break outer;
+        let px = cx + (rng()-0.5)*spacing*0.7, py = cy + (rng()-0.5)*spacing*0.7;
+        gradAt(px|0, py|0, g);
+        const mag = Math.hypot(g[0], g[1]);
+        if(mag < thr) continue;
+        let ang = (mag > 0.02) ? Math.atan2(g[0], -g[1]) : layerAngle;
+        ang += (rng()-0.5) * wob * HALF_PI_JIT;
+        rgbAt(px|0, py|0, col);
+        const r = Math.min(1,Math.max(0, col[0]+(rng()-0.5)*cj));
+        const gg= Math.min(1,Math.max(0, col[1]+(rng()-0.5)*cj));
+        const bb= Math.min(1,Math.max(0, col[2]+(rng()-0.5)*cj));
+        const seed = rng();
+        const sl = halfLen * (0.70 + 0.65*rng());
+        const sw = width    * (0.72 + 0.56*rng());
+        const dx0 = Math.cos(ang), dy0 = Math.sin(ang);
+        let fx = px + dx0*sl, fy = py + dy0*sl;
+        gradAt(fx|0, fy|0, g);
+        let fang = (Math.hypot(g[0],g[1])>0.02) ? Math.atan2(g[0],-g[1]) : ang;
+        if(Math.cos(fang-ang) < 0){ fang += Math.PI; }
+        fx = px + (dx0 + Math.cos(fang))*0.5*sl; fy = py + (dy0 + Math.sin(fang))*0.5*sl;
+        let bx = px - dx0*sl, by = py - dy0*sl;
+        gradAt(bx|0, by|0, g);
+        let bang = (Math.hypot(g[0],g[1])>0.02) ? Math.atan2(g[0],-g[1]) : ang;
+        if(Math.cos(bang-ang) < 0){ bang += Math.PI; }
+        bx = px - (dx0 + Math.cos(bang))*0.5*sl; by = py - (dy0 + Math.sin(bang))*0.5*sl;
+        const P = [[bx,by],[px,py],[fx,fy]];
+        const hw = sw * 0.5, perp = [];
+        for(let k=0;k<3;k++){
+          const a = P[Math.max(0,k-1)], b = P[Math.min(2,k+1)];
+          let tx = b[0]-a[0], ty = b[1]-a[1];
+          const tl = Math.hypot(tx,ty) || 1; tx/=tl; ty/=tl;
+          perp.push([-ty*hw, tx*hw]);
+        }
+        const L=[], Rr=[];
+        for(let k=0;k<3;k++){ L.push(toClip(P[k][0]+perp[k][0], P[k][1]+perp[k][1])); Rr.push(toClip(P[k][0]-perp[k][0], P[k][1]-perp[k][1])); }
+        const al=[0.0,0.5,1.0];
+        const push = (v, aa, ac)=>{ buf[off++]=v[0]; buf[off++]=v[1]; buf[off++]=aa; buf[off++]=ac; buf[off++]=r; buf[off++]=gg; buf[off++]=bb; buf[off++]=seed; };
+        push(L[0],al[0],-1); push(Rr[0],al[0],1); push(Rr[1],al[1],1);
+        push(L[0],al[0],-1); push(Rr[1],al[1],1); push(L[1],al[1],-1);
+        push(L[1],al[1],-1); push(Rr[1],al[1],1); push(Rr[2],al[2],1);
+        push(L[1],al[1],-1); push(Rr[2],al[2],1); push(L[2],al[2],-1);
+        count++;
+      }
+    }
+  }
+  strokeVertCount = count * 12;
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, buf.subarray(0, off), gl.DYNAMIC_DRAW);
+  strokesDirty = false;
+  document.getElementById("hint").textContent = count.toLocaleString() + " strokes" + (count>=CAP_STROKES ? " (capped)" : "");
+}
+
+// ---------------------------------------------------------------- render
+let needsRender = false;
+function requestRender(){ if(srcTex) needsRender = true; }
+function tick(){ if(needsRender){ needsRender = false; render(); } requestAnimationFrame(tick); }
+function render(){
+  if(!srcTex) return;
+  if(strokesDirty) rebuildStrokes();
+  const texel = [1/procW, 1/procH];
+  // underpainting
+  gl.disable(gl.BLEND);
+  let pr = PROG.tex; gl.useProgram(pr.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.paint.fbo); gl.viewport(0,0,procW,procH);
+  bindTex(0, srcTex); gl.uniform1i(pr.u.uTex, 0); gl.uniform1f(pr.u.uMul, 0.88);
+  setQuadAttribs(); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  // strokes
+  pr = PROG.stroke; gl.useProgram(pr.p);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.uniform1f(pr.u.uImpasto, params.impasto); setBrushUniforms(pr.u);
+  setStrokeAttribs(strokeBuf);
+  if(strokeVertCount > 0) gl.drawArrays(gl.TRIANGLES, 0, strokeVertCount);
+  gl.disable(gl.BLEND);
+  // edges
+  pr = PROG.edge; gl.useProgram(pr.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.edge.fbo); gl.viewport(0,0,procW,procH);
+  bindTex(0, srcTex); gl.uniform1i(pr.u.uSrc, 0);
+  gl.uniform2fv(pr.u.uTexel, texel); gl.uniform1f(pr.u.uSigma, params.edgeSigma);
+  setQuadAttribs(); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  // composite
+  pr = PROG.comp; gl.useProgram(pr.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0,0,canvas.width,canvas.height);
+  bindTex(0, T.paint.tex); gl.uniform1i(pr.u.uPaint, 0);
+  bindTex(1, T.edge.tex);  gl.uniform1i(pr.u.uEdge, 1);
+  gl.uniform2f(pr.u.uRes, procW, procH);
+  gl.uniform1f(pr.u.uPosterize, params.posterize);
+  gl.uniform1f(pr.u.uSat, params.sat); gl.uniform1f(pr.u.uContrast, params.contrast);
+  gl.uniform1f(pr.u.uBright, params.bright); gl.uniform1f(pr.u.uWarmth, params.warmth);
+  gl.uniform1f(pr.u.uPaper, params.paper); gl.uniform1f(pr.u.uPaperMode, params.paperMode);
+  gl.uniform1f(pr.u.uEdgeOn, params.edgeOn ? 1.0 : 0.0);
+  gl.uniform1f(pr.u.uEdgeStrength, params.edgeStrength);
+  gl.uniform3fv(pr.u.uEdgeColor, hexRGB(params.edgeColor));
+  gl.uniform1f(pr.u.uVignette, params.vignette);
+  setQuadAttribs(); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ---------------------------------------------------------------- brush preview
+const prev2d = document.getElementById("brushPreview");
+prev2d.width = PREV_W; prev2d.height = PREV_H;
+const prevCtx = prev2d.getContext("2d");
+const prevPixels = new Uint8Array(PREV_W * PREV_H * 4);
+const prevImageData = prevCtx.createImageData(PREV_W, PREV_H);
+function buildPreviewStrokes(){
+  // three horizontal test strokes with different colors/seeds
+  const strokes = [
+    { cy: 0.45, seed:0.20, col:[0.28,0.45,0.72] },
+    { cy: 0.00, seed:0.57, col:[0.80,0.40,0.28] },
+    { cy:-0.45, seed:0.86, col:[0.42,0.55,0.32] }
+  ];
+  const arr = [];
+  const x0=-0.86, x1=0.86, hw=0.30;
+  strokes.forEach(s=>{
+    const P=[[x0,s.cy],[0,s.cy],[x1,s.cy]];
+    const L=P.map(p=>[p[0], p[1]+hw]), R=P.map(p=>[p[0], p[1]-hw]);
+    const al=[0,0.5,1];
+    const push=(v,aa,ac)=>{ arr.push(v[0],v[1],aa,ac, s.col[0],s.col[1],s.col[2], s.seed); };
+    push(L[0],al[0],-1); push(R[0],al[0],1); push(R[1],al[1],1);
+    push(L[0],al[0],-1); push(R[1],al[1],1); push(L[1],al[1],-1);
+    push(L[1],al[1],-1); push(R[1],al[1],1); push(R[2],al[2],1);
+    push(L[1],al[1],-1); push(R[2],al[2],1); push(L[2],al[2],-1);
+  });
+  gl.bindBuffer(gl.ARRAY_BUFFER, previewBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.DYNAMIC_DRAW);
+}
+function renderBrushPreview(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, previewTarget.fbo);
+  gl.viewport(0,0,PREV_W,PREV_H);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0.925, 0.915, 0.885, 1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+  const pr = PROG.stroke; gl.useProgram(pr.p);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.uniform1f(pr.u.uImpasto, Math.max(0.4, params.impasto)); setBrushUniforms(pr.u);
+  setStrokeAttribs(previewBuf);
+  gl.drawArrays(gl.TRIANGLES, 0, 36);
+  gl.disable(gl.BLEND);
+  gl.readPixels(0,0,PREV_W,PREV_H, gl.RGBA, gl.UNSIGNED_BYTE, prevPixels);
+  // flip Y into ImageData
+  const d = prevImageData.data, rowBytes = PREV_W*4;
+  for(let y=0;y<PREV_H;y++){
+    const sYoff = (PREV_H-1-y)*rowBytes, dYoff = y*rowBytes;
+    for(let x=0;x<rowBytes;x++) d[dYoff+x] = prevPixels[sYoff+x];
+  }
+  prevCtx.putImageData(prevImageData, 0, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+// ---------------------------------------------------------------- brush UI
+const rr = (a,b)=> a + Math.random()*(b-a);
+function randomBrush(){
+  const fam = Math.floor(Math.random()*4);
+  const b = { bodyW:rr(0.6,1.0), edgeHard:rr(0.1,0.9), flat:rr(0,1), tipFront:rr(0.05,0.55), tipBack:rr(0.05,0.55),
+    belly:0, pressure:rr(-0.5,0.5), bristleN:0, bristleD:0, grain:0, grainScale:Math.round(rr(10,30)),
+    edgeNoise:rr(0,0.2), relief:rr(0.4,1.2), vary:rr(0.1,0.5) };
+  if(fam===0){ b.bristleN=Math.round(rr(5,14)); b.bristleD=rr(0.4,0.9); b.edgeHard=rr(0.3,0.6); }
+  else if(fam===1){ b.grain=rr(0.5,1.0); b.edgeNoise=rr(0.3,0.7); b.bristleN=Math.round(rr(0,6)); b.bristleD=rr(0.2,0.6); }
+  else if(fam===2){ b.belly=rr(0.6,1.0); b.tipFront=rr(0.3,0.6); b.tipBack=rr(0.3,0.6); b.edgeHard=rr(0.4,0.8); }
+  else { b.edgeHard=rr(0.6,0.95); b.flat=rr(0.5,1.0); b.pressure=rr(-0.6,0.6); b.tipFront=rr(0.03,0.2); b.tipBack=rr(0.03,0.2); }
+  return b;
+}
+
+const brushSel = document.getElementById("brushSel");
+const brushSlidersEl = document.getElementById("brushSliders");
+const brushRowEls = {};
+BRUSH_SLIDERS.forEach(([key,label,min,max,step])=>{
+  const row = document.createElement("div"); row.className = "row";
+  row.innerHTML = '<div class="lbl"><span>'+label+'</span><span class="val"></span></div>'
+    + '<input type="range" min="'+min+'" max="'+max+'" step="'+step+'">';
+  const input = row.querySelector("input"), val = row.querySelector(".val");
+  brushRowEls[key] = { input, val };
+  input.addEventListener("input", ()=>{
+    currentBrush[key] = parseFloat(input.value);
+    val.textContent = fmtNum(currentBrush[key]);
+    currentBrushName = "Custom"; rebuildBrushSelect(); brushSel.value = "custom";
+    renderBrushPreview(); requestRender();
+  });
+  brushSlidersEl.appendChild(row);
+});
+function fmtNum(v){ return (Math.abs(v)>=10||v===Math.round(v)) ? String(v) : (+v).toFixed(2); }
+function syncBrushSliders(){ BRUSH_SLIDERS.forEach(([key])=>{ const e=brushRowEls[key]; e.input.value=currentBrush[key]; e.val.textContent=fmtNum(currentBrush[key]); }); }
+function rebuildBrushSelect(){
+  let html = "";
+  html += '<optgroup label="Built-in">';
+  Object.keys(BRUSH_PRESETS).forEach(n=> html += '<option value="b:'+n+'">'+n+'</option>');
+  html += '</optgroup>';
+  if(customBrushes.length){
+    html += '<optgroup label="Custom">';
+    customBrushes.forEach((c,i)=> html += '<option value="c:'+i+'">'+c.name+'</option>');
+    html += '</optgroup>';
+  }
+  if(currentBrushName==="Custom") html += '<option value="custom">Custom (unsaved)</option>';
+  brushSel.innerHTML = html;
+  if(currentBrushName==="Custom") brushSel.value = "custom";
+  else if(currentBrushName.indexOf("__c")===0) brushSel.value = "c:"+currentBrushName.slice(3);
+  else brushSel.value = "b:"+currentBrushName;
+}
+function loadBrush(obj, name){ currentBrush = cloneBrush(obj); currentBrushName = name; syncBrushSliders(); rebuildBrushSelect(); renderBrushPreview(); requestRender(); }
+brushSel.addEventListener("change", ()=>{
+  const v = brushSel.value;
+  if(v==="custom") return;
+  if(v.charAt(0)==="b"){ const n=v.slice(2); loadBrush(BRUSH_PRESETS[n], n); }
+  else if(v.charAt(0)==="c"){ const i=parseInt(v.slice(2),10); loadBrush(customBrushes[i].params, "__c"+i); brushSel.value="c:"+i; }
+  markCustom();
+});
+document.getElementById("btnRandom").addEventListener("click", ()=>{
+  currentBrush = randomBrush(); currentBrushName = "Custom";
+  syncBrushSliders(); rebuildBrushSelect(); brushSel.value="custom"; renderBrushPreview(); requestRender();
+});
+document.getElementById("btnSaveBrush").addEventListener("click", ()=>{
+  const name = (prompt("Name this brush:", "My Brush "+(customBrushes.length+1)) || "").trim();
+  if(!name) return;
+  customBrushes.push({ name, params: cloneBrush(currentBrush) });
+  currentBrushName = "__c"+(customBrushes.length-1);
+  rebuildBrushSelect(); brushSel.value = "c:"+(customBrushes.length-1);
+});
+document.getElementById("btnDelBrush").addEventListener("click", ()=>{
+  const v = brushSel.value;
+  if(v.charAt(0)!=="c"){ alert("Select a custom brush to delete."); return; }
+  const i = parseInt(v.slice(2),10);
+  customBrushes.splice(i,1);
+  loadBrush(BRUSH_PRESETS["Bristle"], "Bristle");
+});
+document.getElementById("btnEditBrush").addEventListener("click", ()=>{
+  document.getElementById("designer").classList.toggle("hidden");
+});
+document.getElementById("btnExport").addEventListener("click", ()=>{
+  document.getElementById("brushIO").value = JSON.stringify(customBrushes);
+});
+document.getElementById("btnImport").addEventListener("click", ()=>{
+  try{
+    const arr = JSON.parse(document.getElementById("brushIO").value);
+    if(!Array.isArray(arr)) throw 0;
+    arr.forEach(x=>{ if(x && x.name && x.params) customBrushes.push({ name:String(x.name), params:cloneBrush(x.params) }); });
+    rebuildBrushSelect();
+    alert("Imported. Total custom brushes: "+customBrushes.length);
+  }catch(e){ alert("Could not parse brush JSON."); }
+});
+
+// ---------------------------------------------------------------- main param UI
+const rowEls = {};
+document.querySelectorAll(".row[data-r]").forEach(row=>{
+  const key = row.getAttribute("data-r");
+  const input = row.querySelector("input[type=range]"), val = row.querySelector(".val");
+  rowEls[key] = { input, val };
+  input.addEventListener("input", ()=>{
+    params[key] = parseFloat(input.value); updateVal(key); markCustom();
+    if(STROKE_KEYS[key]) strokesDirty = true; requestRender();
+  });
+});
+function fmt(key,v){ if(key==="posterize") return v<1 ? "off" : String(v); if(key==="brushSize") return String(v); return (+v).toFixed(2); }
+function updateVal(key){ if(rowEls[key]){ rowEls[key].input.value = params[key]; rowEls[key].val.textContent = fmt(key, params[key]); } }
+
+const paperSeg = document.getElementById("paperMode");
+paperSeg.querySelectorAll("button").forEach(b=> b.addEventListener("click", ()=>{ params.paperMode = parseInt(b.getAttribute("data-v"),10); syncPaperSeg(); markCustom(); requestRender(); }));
+function syncPaperSeg(){ paperSeg.querySelectorAll("button").forEach(b=> b.classList.toggle("on", parseInt(b.getAttribute("data-v"),10)===params.paperMode)); }
+
+const edgeSwitch = document.getElementById("edgeSwitch");
+edgeSwitch.addEventListener("click", ()=>{ params.edgeOn = params.edgeOn?0:1; edgeSwitch.classList.toggle("on", !!params.edgeOn); markCustom(); requestRender(); });
+document.getElementById("edgeColor").addEventListener("input", e=>{ params.edgeColor = e.target.value; markCustom(); requestRender(); });
+
+const presetWrap = document.getElementById("presets");
+Object.keys(PRESETS).forEach(name=>{ const b = document.createElement("button"); b.textContent = name; b.addEventListener("click", ()=> applyPreset(name)); presetWrap.appendChild(b); });
+function applyPreset(name){
+  curPreset = name; const P = PRESETS[name];
+  params = {}; Object.keys(P).forEach(k=>{ if(k!=="brush") params[k]=P[k]; });
+  loadBrush(BRUSH_PRESETS[P.brush], P.brush);
+  strokesDirty = true; syncAllUI(); requestRender();
+}
+function markCustom(){ curPreset = null; presetWrap.querySelectorAll("button").forEach(b=> b.classList.remove("active")); }
+function syncAllUI(){
+  NUMERIC.forEach(updateVal); syncPaperSeg();
+  edgeSwitch.classList.toggle("on", !!params.edgeOn);
+  document.getElementById("edgeColor").value = params.edgeColor;
+  presetWrap.querySelectorAll("button").forEach(b=> b.classList.toggle("active", b.textContent===curPreset));
+}
+
+document.getElementById("reshuffle").addEventListener("click", ()=>{ seedSalt++; strokesDirty = true; requestRender(); });
+document.getElementById("procSize").addEventListener("change", ()=>{ rebuildSource(); requestRender(); });
+document.getElementById("fileIn").addEventListener("change", e=> fileToImage(e.target.files[0]));
+document.getElementById("dropZone").addEventListener("click", ()=> document.getElementById("fileIn").click());
+function fileToImage(file){
+  if(!file || !/^image\//.test(file.type)) return;
+  const url = URL.createObjectURL(file), img = new Image();
+  img.onload = ()=>{ loadImage(img); URL.revokeObjectURL(url); };
+  img.onerror = ()=>{ alert("Could not load that image."); URL.revokeObjectURL(url); };
+  img.src = url;
+}
+const stage = document.getElementById("stage");
+["dragenter","dragover"].forEach(ev=> stage.addEventListener(ev, e=>{ e.preventDefault(); stage.classList.add("drag"); }));
+stage.addEventListener("dragleave", e=>{ if(!stage.contains(e.relatedTarget)) stage.classList.remove("drag"); });
+stage.addEventListener("drop", e=>{ e.preventDefault(); stage.classList.remove("drag"); if(e.dataTransfer.files[0]) fileToImage(e.dataTransfer.files[0]); });
+window.addEventListener("paste", e=>{ const items = e.clipboardData && e.clipboardData.items; if(!items) return; for(const it of items){ if(it.type.indexOf("image")===0){ fileToImage(it.getAsFile()); break; } } });
+
+function download(){
+  if(!srcTex) return; render();
+  canvas.toBlob(blob=>{
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = "painterly-" + (curPreset ? curPreset.toLowerCase().replace(/[^a-z]+/g,"-") : "custom") + ".png";
+    a.click(); setTimeout(()=> URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
+}
+document.getElementById("dlBtn").addEventListener("click", download);
+document.getElementById("dlBtn2").addEventListener("click", download);
+
+// boot
+buildPreviewStrokes();
+curPreset = "Van Gogh";
+syncAllUI();
+loadBrush(BRUSH_PRESETS["Bristle"], "Bristle");
+tick();
+
+})();
+</script>
+</body>
+</html>
