@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Painterly Studio</title>
+<!-- Painterly v1.1.0 -->
 
 <!-- ============================ SHADERS ============================ -->
 <script type="x-shader/x-vertex" id="vs_quad">
@@ -21,7 +22,8 @@ precision mediump float;
 varying vec2 vUv;
 uniform sampler2D uTex;
 uniform float uMul;
-void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb * uMul, 1.0); }
+uniform vec3 uTone;
+void main(){ gl_FragColor = vec4(texture2D(uTex, vUv).rgb * uMul * uTone, 1.0); }
 </script>
 
 <script type="x-shader/x-vertex" id="vs_stroke">
@@ -157,7 +159,7 @@ uniform sampler2D uPaint;
 uniform sampler2D uEdge;
 uniform vec2  uRes;
 uniform float uPosterize, uSat, uContrast, uBright, uWarmth;
-uniform float uPaper, uPaperMode, uEdgeOn, uEdgeStrength, uVignette;
+uniform float uPaper, uPaperMode, uEdgeOn, uEdgeStrength, uVignette, uVarnish;
 uniform vec3  uEdgeColor;
 const vec3 LUM = vec3(0.299, 0.587, 0.114);
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -167,6 +169,7 @@ float vnoise(vec2 p){
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 float fbm(vec2 p){ float s = 0.0, amp = 0.5; for(int i = 0; i < 5; i++){ s += amp * vnoise(p); p *= 2.0; amp *= 0.5; } return s; }
+float heightAt(vec2 uv, vec2 res){ float h = dot(texture2D(uPaint, uv).rgb, LUM); h += 0.12 * vnoise(uv * res * 0.75); return h; }
 void main(){
   vec3 col = texture2D(uPaint, vUv).rgb;
   if(uPosterize > 1.5){ col = floor(col * uPosterize + 0.5) / uPosterize; }
@@ -191,6 +194,19 @@ void main(){
 
   float e = texture2D(uEdge, vUv).r;
   if(uEdgeOn > 0.5){ col = mix(col, uEdgeColor, clamp((1.0 - e) * uEdgeStrength, 0.0, 1.0)); }
+
+  if(uVarnish > 0.001){
+    vec2 tx = 1.0 / uRes;
+    float hC = heightAt(vUv, uRes);
+    float hX = heightAt(vUv + vec2(tx.x, 0.0), uRes);
+    float hY = heightAt(vUv + vec2(0.0, tx.y), uRes);
+    vec3 nrm = normalize(vec3((hC - hX) * uVarnish * 6.0, (hC - hY) * uVarnish * 6.0, 1.0));
+    vec3 Ldir = normalize(vec3(-0.6, 0.6, 0.75));
+    float diff = clamp(dot(nrm, Ldir), 0.0, 1.0);
+    float spec = pow(diff, 24.0);
+    col *= 0.85 + 0.30 * diff;          // raised-paint directional shading
+    col += vec3(spec) * uVarnish * 0.35; // gloss highlight on ridges
+  }
 
   vec2 q = vUv - 0.5;
   col *= 1.0 - uVignette * dot(q, q) * 2.0;
@@ -310,7 +326,7 @@ void main(){
 
 <header>
   <h1>Painterly&nbsp;<span>Studio</span></h1>
-  <span class="sub">custom brushes &bull; stroke-based rendering</span>
+  <span class="sub">custom brushes &bull; stroke-based rendering &bull; v1.1.0</span>
   <span class="spacer"></span>
   <label class="file" for="fileIn">Open image</label>
   <input type="file" id="fileIn" accept="image/*">
@@ -397,6 +413,7 @@ void main(){
         </div>
         <div class="row" data-r="paper"><div class="lbl"><span>Texture amount</span><span class="val"></span></div><input type="range" min="0" max="1" step="0.02"></div>
         <div class="row" data-r="vignette"><div class="lbl"><span>Vignette</span><span class="val"></span></div><input type="range" min="0" max="1" step="0.02"></div>
+        <div class="row" data-r="varnish"><div class="lbl"><span>Varnish / relief light</span><span class="val"></span></div><input type="range" min="0" max="1.4" step="0.02"></div>
       </div>
     </div>
 
@@ -475,16 +492,23 @@ let currentBrushName = "Bristle";
 
 // ---------------------------------------------------------------- style presets
 const PRESETS = {
-  "Thick Oil":    { brush:"Flat",      brushSize:15, strokeLength:2.75, density:0.95, detail:0.5, wobble:0.25, colorJitter:0.08, impasto:0.75, edgeOn:0, edgeStrength:0.6, edgeSigma:1.2, paperMode:0, paper:0.30, sat:1.15, contrast:1.10, bright:0.0,  warmth:0.04, posterize:0, vignette:0.16, edgeColor:"#191410" },
-  "Van Gogh":     { brush:"Bristle",   brushSize:10, strokeLength:4.5,  density:1.15, detail:0.7, wobble:0.55, colorJitter:0.13, impasto:1.05, edgeOn:0, edgeStrength:0.6, edgeSigma:1.1, paperMode:0, paper:0.24, sat:1.32, contrast:1.15, bright:0.02, warmth:0.05, posterize:0, vignette:0.20, edgeColor:"#191410" },
-  "Impasto Knife":{ brush:"Chisel",    brushSize:22, strokeLength:2.0,  density:0.85, detail:0.3, wobble:0.30, colorJitter:0.06, impasto:1.4,  edgeOn:0, edgeStrength:0.5, edgeSigma:1.2, paperMode:2, paper:0.20, sat:1.20, contrast:1.16, bright:0.0,  warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#191410" },
-  "Watercolor":   { brush:"Tapered",   brushSize:13, strokeLength:3.5,  density:1.05, detail:0.5, wobble:0.35, colorJitter:0.05, impasto:0.15, edgeOn:1, edgeStrength:0.45,edgeSigma:1.0, paperMode:1, paper:0.60, sat:0.95, contrast:0.96, bright:0.04, warmth:0.0,  posterize:0, vignette:0.10, edgeColor:"#2a2620" },
-  "Gouache":      { brush:"Flat",      brushSize:10, strokeLength:2.5,  density:1.1,  detail:0.6, wobble:0.30, colorJitter:0.06, impasto:0.45, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:2, paper:0.40, sat:1.06, contrast:1.05, bright:0.02, warmth:0.02, posterize:0, vignette:0.10, edgeColor:"#191410" },
-  "Ink Brush":    { brush:"Tapered",   brushSize:9,  strokeLength:4.0,  density:1.05, detail:0.8, wobble:0.40, colorJitter:0.05, impasto:0.3,  edgeOn:1, edgeStrength:0.9, edgeSigma:0.95,paperMode:1, paper:0.30, sat:0.92, contrast:1.08, bright:0.0,  warmth:0.0,  posterize:0, vignette:0.10, edgeColor:"#0d0b09" },
-  "Pointillist":  { brush:"Round",     brushSize:8,  strokeLength:1.0,  density:1.35, detail:0.75,wobble:0.6,  colorJitter:0.16, impasto:0.55, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:0, paper:0.18, sat:1.35, contrast:1.16, bright:0.02, warmth:0.02, posterize:0, vignette:0.16, edgeColor:"#191410" },
-  "Dry Sketch":   { brush:"Dry brush", brushSize:11, strokeLength:3.2,  density:1.0,  detail:0.7, wobble:0.4,  colorJitter:0.07, impasto:0.6,  edgeOn:1, edgeStrength:0.5, edgeSigma:1.0, paperMode:2, paper:0.5,  sat:1.0,  contrast:1.08, bright:0.03, warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#20201c" }
+  "Thick Oil":    { brush:"Flat",      brushSize:15, strokeLength:2.75, density:0.95, detail:0.5, wobble:0.25, colorJitter:0.08, impasto:0.75, edgeOn:0, edgeStrength:0.6, edgeSigma:1.2, paperMode:0, paper:0.30, sat:1.15, contrast:1.10, bright:0.0,  warmth:0.04, posterize:0, vignette:0.16, edgeColor:"#191410", varnish:0.50, tone:"#f3ead6" },
+  "Van Gogh":     { brush:"Bristle",   brushSize:10, strokeLength:4.5,  density:1.15, detail:0.7, wobble:0.55, colorJitter:0.13, impasto:1.05, edgeOn:0, edgeStrength:0.6, edgeSigma:1.1, paperMode:0, paper:0.24, sat:1.32, contrast:1.15, bright:0.02, warmth:0.05, posterize:0, vignette:0.20, edgeColor:"#191410", varnish:0.70, tone:"#f1e7cf" },
+  "Impasto Knife":{ brush:"Chisel",    brushSize:22, strokeLength:2.0,  density:0.85, detail:0.3, wobble:0.30, colorJitter:0.06, impasto:1.4,  edgeOn:0, edgeStrength:0.5, edgeSigma:1.2, paperMode:2, paper:0.20, sat:1.20, contrast:1.16, bright:0.0,  warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#191410", varnish:1.00, tone:"#efe6d0" },
+  "Watercolor":   { brush:"Tapered",   brushSize:13, strokeLength:3.5,  density:1.05, detail:0.5, wobble:0.35, colorJitter:0.05, impasto:0.15, edgeOn:1, edgeStrength:0.45,edgeSigma:1.0, paperMode:1, paper:0.60, sat:0.95, contrast:0.96, bright:0.04, warmth:0.0,  posterize:0, vignette:0.10, edgeColor:"#2a2620", varnish:0.12, tone:"#ffffff" },
+  "Gouache":      { brush:"Flat",      brushSize:10, strokeLength:2.5,  density:1.1,  detail:0.6, wobble:0.30, colorJitter:0.06, impasto:0.45, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:2, paper:0.40, sat:1.06, contrast:1.05, bright:0.02, warmth:0.02, posterize:0, vignette:0.10, edgeColor:"#191410", varnish:0.30, tone:"#f6f0e2" },
+  "Ink Brush":    { brush:"Tapered",   brushSize:9,  strokeLength:4.0,  density:1.05, detail:0.8, wobble:0.40, colorJitter:0.05, impasto:0.3,  edgeOn:1, edgeStrength:0.9, edgeSigma:0.95,paperMode:1, paper:0.30, sat:0.92, contrast:1.08, bright:0.0,  warmth:0.0,  posterize:0, vignette:0.10, edgeColor:"#0d0b09", varnish:0.10, tone:"#ffffff" },
+  "Pointillist":  { brush:"Round",     brushSize:8,  strokeLength:1.0,  density:1.35, detail:0.75,wobble:0.6,  colorJitter:0.16, impasto:0.55, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:0, paper:0.18, sat:1.35, contrast:1.16, bright:0.02, warmth:0.02, posterize:0, vignette:0.16, edgeColor:"#191410", varnish:0.45, tone:"#f4ecda" },
+  "Dry Sketch":   { brush:"Dry brush", brushSize:11, strokeLength:3.2,  density:1.0,  detail:0.7, wobble:0.4,  colorJitter:0.07, impasto:0.6,  edgeOn:1, edgeStrength:0.5, edgeSigma:1.0, paperMode:2, paper:0.5,  sat:1.0,  contrast:1.08, bright:0.03, warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#20201c", varnish:0.25, tone:"#f2ebdc" },
+  "Old Master":   { brush:"Round",     brushSize:7,  strokeLength:2.4,  density:1.2,  detail:0.92,wobble:0.15, colorJitter:0.03, impasto:0.40, edgeOn:0, edgeStrength:0.6, edgeSigma:1.2, paperMode:0, paper:0.22, sat:1.0,  contrast:1.20, bright:-0.01,warmth:0.06, posterize:0, vignette:0.30, edgeColor:"#1a130c", varnish:0.85, tone:"#d9c6a0" },
+  "Rembrandt":    { brush:"Bristle",   brushSize:9,  strokeLength:3.0,  density:1.1,  detail:0.82,wobble:0.30, colorJitter:0.06, impasto:0.70, edgeOn:0, edgeStrength:0.6, edgeSigma:1.1, paperMode:0, paper:0.24, sat:0.98, contrast:1.26, bright:-0.02,warmth:0.10, posterize:0, vignette:0.36, edgeColor:"#140d07", varnish:0.95, tone:"#c7a469" },
+  "Sargent":      { brush:"Flat",      brushSize:16, strokeLength:2.5,  density:0.95, detail:0.5, wobble:0.30, colorJitter:0.06, impasto:0.85, edgeOn:0, edgeStrength:0.5, edgeSigma:1.2, paperMode:0, paper:0.26, sat:1.08, contrast:1.12, bright:0.01, warmth:0.04, posterize:0, vignette:0.20, edgeColor:"#1a130c", varnish:0.70, tone:"#e8ddc6" },
+  "Monet":        { brush:"Bristle",   brushSize:7,  strokeLength:1.8,  density:1.3,  detail:0.8, wobble:0.60, colorJitter:0.18, impasto:0.60, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:0, paper:0.20, sat:1.30, contrast:1.06, bright:0.03, warmth:0.02, posterize:0, vignette:0.16, edgeColor:"#1a130c", varnish:0.50, tone:"#efe7d4" },
+  "Realist Oil":  { brush:"Round",     brushSize:5,  strokeLength:2.2,  density:1.25, detail:1.0, wobble:0.14, colorJitter:0.03, impasto:0.32, edgeOn:0, edgeStrength:0.5, edgeSigma:1.0, paperMode:0, paper:0.16, sat:1.04, contrast:1.06, bright:0.0,  warmth:0.02, posterize:0, vignette:0.14, edgeColor:"#1a130c", varnish:0.45, tone:"#ffffff" },
+  "Turner":       { brush:"Tapered",   brushSize:14, strokeLength:4.5,  density:1.0,  detail:0.4, wobble:0.50, colorJitter:0.05, impasto:0.25, edgeOn:0, edgeStrength:0.5, edgeSigma:1.1, paperMode:1, paper:0.40, sat:1.05, contrast:0.98, bright:0.06, warmth:0.09, posterize:0, vignette:0.18, edgeColor:"#2a2318", varnish:0.40, tone:"#f3e8cf" },
+  "Cezanne":      { brush:"Chisel",    brushSize:16, strokeLength:1.8,  density:0.95, detail:0.5, wobble:0.20, colorJitter:0.07, impasto:0.70, edgeOn:0, edgeStrength:0.5, edgeSigma:1.2, paperMode:0, paper:0.22, sat:1.12, contrast:1.10, bright:0.01, warmth:0.03, posterize:0, vignette:0.16, edgeColor:"#1a130c", varnish:0.55, tone:"#e9e1ce" }
 };
-const NUMERIC = ["brushSize","strokeLength","density","detail","wobble","colorJitter","impasto","edgeStrength","edgeSigma","paper","vignette","sat","contrast","bright","warmth","posterize"];
+const NUMERIC = ["brushSize","strokeLength","density","detail","wobble","colorJitter","impasto","edgeStrength","edgeSigma","paper","vignette","sat","contrast","bright","warmth","posterize","varnish"];
 const STROKE_KEYS = { brushSize:1, strokeLength:1, density:1, detail:1, wobble:1, colorJitter:1 };
 let params = {}, curPreset = "Van Gogh";
 Object.assign(params, PRESETS["Van Gogh"]);
@@ -839,7 +863,7 @@ function render(){
   gl.disable(gl.BLEND);
   let pr = PROG.tex; gl.useProgram(pr.p);
   gl.bindFramebuffer(gl.FRAMEBUFFER, T.paint.fbo); gl.viewport(0,0,procW,procH);
-  bindTex(0, srcTex); gl.uniform1i(pr.u.uTex, 0); gl.uniform1f(pr.u.uMul, 0.88);
+  bindTex(0, srcTex); gl.uniform1i(pr.u.uTex, 0); gl.uniform1f(pr.u.uMul, 0.88); gl.uniform3fv(pr.u.uTone, hexRGB(params.tone || "#ffffff"));
   setQuadAttribs(); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   // strokes
   pr = PROG.stroke; gl.useProgram(pr.p);
@@ -868,6 +892,7 @@ function render(){
   gl.uniform1f(pr.u.uEdgeStrength, params.edgeStrength);
   gl.uniform3fv(pr.u.uEdgeColor, hexRGB(params.edgeColor));
   gl.uniform1f(pr.u.uVignette, params.vignette);
+  gl.uniform1f(pr.u.uVarnish, params.varnish === undefined ? 0.0 : params.varnish);
   setQuadAttribs(); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
