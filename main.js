@@ -388,6 +388,23 @@ function download(){
 document.getElementById("dlBtn").addEventListener("click", download);
 document.getElementById("dlBtn2").addEventListener("click", download);
 
+// shared image shelf (snicker02.github.io/shared/bridge.js)
+if(window.SnickerShelf){
+  window.SnickerShelf.mount({
+    app: "Painterly",
+    button: document.getElementById("shelfBtn"),
+    onImage: file => fileToImage(file),
+    getImage: () => {
+      if(!srcTex) throw new Error("open an image first");
+      render();   // GL context keeps its drawing buffer, so read straight after drawing
+      return new Promise((res, rej)=> canvas.toBlob(b => b ? res(b) : rej(new Error("encode failed")), "image/png"));
+    },
+    getMeta: () => ({ name: "painterly-" + (curPreset ? curPreset.toLowerCase().replace(/[^a-z]+/g,"-") : "custom") + ".png" }),
+  });
+} else {
+  document.getElementById("shelfBtn").hidden = true;
+}
+
 // confirm mode wiring
 document.getElementById("applyBtn").addEventListener("click", applyHeld);
 {
