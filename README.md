@@ -29,9 +29,11 @@ Served statically (GitHub Pages). Open locally with any static server, e.g.
 
 ## Version
 
-**v1.2.0** — Brush realism + module split
+**v1.3.0**: shared image shelf
 
 ### Changelog
+- **v1.3.0**
+  - Adds the **⇄ Shelf** header button. You can load photos from the image shelf that all snicker02 apps share, and send paintings to other apps.
 - **v1.2.0**
   - Split the single-file app into `index.html` + `main.js` + `engine/` ES modules.
   - Rebuilt the brush shader for real paint behaviour, fixing the "fake" look:
@@ -48,6 +50,17 @@ Served statically (GitHub Pages). Open locally with any static server, e.g.
   pass; per-style imprimatura tone.
 - **v1.0** — Flow-field stroke renderer, parametric brush designer, resolution-
   independent output, mobile tab layout, confirm-before-apply.
+
+## Shared image shelf
+
+The **⇄ Shelf** button opens the image shelf shared by all apps on [snicker02.github.io](https://snicker02.github.io/#shelf). It stores images in this browser only (IndexedDB), and every app on the site can read the same shelf.
+
+- **Save current** puts the current result on the shelf.
+- **Send to ↗** opens another app in a new tab with the image already loaded.
+- **Load here** loads a shelf image into this app. To add images to the shelf, use Add files, Paste, or drop them on the panel.
+- Opening the app with `?shelf=<id>` loads that shelf image on start. Send to uses this.
+
+The shelf code lives in [`snicker02.github.io/shared/bridge.js`](https://github.com/snicker02/snicker02.github.io/blob/main/shared/bridge.js). If it can't load (for example when you're offline), the app works as before and the button is hidden.
 
 ## Controls
 - **Style presets** — one-click looks; each sets a brush, stroke layout, colour

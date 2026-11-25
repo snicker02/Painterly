@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Painterly Studio</title>
-<!-- Painterly v1.2.0 — ES-module build: index.html + main.js + engine/ -->
+<!-- Painterly v1.3.0 — ES-module build: index.html + main.js + engine/ -->
 
 <style>
   :root{ --bg:#0e0f13; --panel:#171922; --panel2:#1e2130; --line:#2a2e3f; --text:#e7e9f0; --dim:#9aa0b4; --accent:#c9a24b; --accent2:#6e8cff; }
@@ -118,11 +118,12 @@
 
 <header>
   <h1>Painterly&nbsp;<span>Studio</span></h1>
-  <span class="sub">custom brushes &bull; stroke-based rendering &bull; v1.2.0</span>
+  <span class="sub">custom brushes &bull; stroke-based rendering &bull; v1.3.0</span>
   <span class="spacer"></span>
   <label class="file" for="fileIn">Open image</label>
   <input type="file" id="fileIn" accept="image/*">
   <button id="applyBtn" class="primary" hidden title="Repaint with the changed settings (Enter)">&#9166; Apply</button>
+  <button id="shelfBtn" title="Shared image shelf: send this painting to another snicker02 app, or load a photo from it">⇄ Shelf</button>
   <button id="dlBtn" disabled>Download</button>
 </header>
 
@@ -245,6 +246,7 @@
   </aside>
 </main>
 
-<script type="module" src="./main.js"></script>
+<script src="https://snicker02.github.io/shared/bridge.js"></script>
+<script type="module" src="./main.js?v=1.3.0"></script>
 </body>
 </html>
