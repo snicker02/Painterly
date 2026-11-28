@@ -77,3 +77,7 @@ Each change: `glslangValidator` on every shader, `node --check` on every module,
 a CPU flow/stroke integration test, and headless Chrome at 390×844, 844×390 and
 1440×900 (image upload + every preset + every brush + live sliders, checking for
 runtime and WebGL errors).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
